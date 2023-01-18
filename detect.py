@@ -31,15 +31,18 @@ import os
 import platform
 import sys
 from pathlib import Path
-
+import paho.mqtt.client as mqtt
 import torch
+import math
+import time
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
-
+base_time = math.floor(time.time())
+count_list = [0] * 100
 from models.common import DetectMultiBackend
 from utils.dataloaders import IMG_FORMATS, VID_FORMATS, LoadImages, LoadScreenshots, LoadStreams
 from utils.general import (LOGGER, Profile, check_file, check_img_size, check_imshow, check_requirements, colorstr, cv2,
@@ -47,6 +50,30 @@ from utils.general import (LOGGER, Profile, check_file, check_img_size, check_im
 from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import select_device, smart_inference_mode
 
+# ブローカーに接続できたときの処理
+def on_connect(client, userdata, flag, rc):
+    print("Connected with result code " + str(rc))
+
+# ブローカーが切断したときの処理
+def on_disconnect(client, userdata, rc):
+    if rc != 0:
+        print("Unexpected disconnection.")
+
+# publishが完了したときの処理
+def on_publish(client, userdata, mid):
+    print("publish: {0}".format(mid))
+
+def mqtt_send(send_string, topic_name, mqtt_server, mqtt_server_port):
+    client = mqtt.Client()                 # クラスのインスタンス(実体)の作成
+    client.on_connect = on_connect         # 接続時のコールバック関数を登録
+    client.on_disconnect = on_disconnect   # 切断時のコールバックを登録
+    client.on_publish = on_publish         # メッセージ送信時のコールバック
+
+    client.connect(mqtt_server, mqtt_server_port, 60)  # 接続先は自分自身
+
+    # 通信処理スタート
+    client.loop_start()    # subはloop_forever()だが，pubはloop_start()で起動だけさせる
+    client.publish(topic_name, send_string)
 
 @smart_inference_mode()
 def run(
@@ -77,6 +104,9 @@ def run(
         half=False,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
         vid_stride=1,  # video frame-rate stride
+        topic_name='',
+        mqtt_server='',
+        mqtt_server_port=1883
 ):
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
@@ -153,9 +183,21 @@ def run(
                 det[:, :4] = scale_boxes(im.shape[2:], det[:, :4], im0.shape).round()
 
                 # Print results
-                for c in det[:, 5].unique():
+                for content_num, c in enumerate(det[:, 5].unique()):
                     n = (det[:, 5] == c).sum()  # detections per class
+                    global count_list
+                    if content_num == 0:
+                        if c == 0:  # check if object is person
+                            count_list[n] += 1
+                        else:
+                            count_list[0] += 1
+
                     s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+
+                if (math.floor(time.time()) - base_time) % 60 == 59 and topic_name != '' and mqtt_server != '':
+                    mqtt_send(f"{count_list.index(max(count_list))}", topic_name=topic_name, mqtt_server=mqtt_server, mqtt_server_port=mqtt_server_port)
+                    count_list = [0] * 100
+                    time.sleep(1)
 
                 # Write results
                 for *xyxy, conf, cls in reversed(det):
@@ -243,6 +285,9 @@ def parse_opt():
     parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
     parser.add_argument('--vid-stride', type=int, default=1, help='video frame-rate stride')
+    parser.add_argument('--topic-name', type=str, default='', help='topic name at mqtt sending')
+    parser.add_argument('--mqtt-server', type=str, default='', help='mqtt server domain')
+    parser.add_argument('--mqtt-server-port', type=int, default=1883, help='mqtt server port')
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     print_args(vars(opt))
